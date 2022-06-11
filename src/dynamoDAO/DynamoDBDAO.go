@@ -1,23 +1,26 @@
 package dynamoDAO
 
 import (
+	"common"
 	"context"
+	"fmt"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"log"
+	"time"
 )
 
-// Get given UUID returns value
-func Get(clientConfig *dynamodb.Client, tableName string, UUID string) (bucket string, region string, filename string) {
+// Get given UUID returns value uses getItem, poses problems if we want the range key for MsName to UUID
+func Get(clientConfig *dynamodb.Client, tableName string, msName string) (UUID string, date string) {
 
 	getItemInput := &dynamodb.GetItemInput{
 		TableName:      aws.String(tableName),
 		ConsistentRead: aws.Bool(true),
 
 		Key: map[string]types.AttributeValue{
-			"UUID": &types.AttributeValueMemberS{Value: UUID},
+			"MsName": &types.AttributeValueMemberS{Value: msName},
 		},
 	}
 
@@ -30,28 +33,29 @@ func Get(clientConfig *dynamodb.Client, tableName string, UUID string) (bucket s
 		log.Fatal("Item not found: ", UUID)
 	}
 
-	err = attributevalue.Unmarshal(output.Item["bucket"], &bucket)
-	err = attributevalue.Unmarshal(output.Item["region"], &region)
-	err = attributevalue.Unmarshal(output.Item["filename"], &filename)
+	err = attributevalue.Unmarshal(output.Item["UUID"], &UUID)
+	err = attributevalue.Unmarshal(output.Item["CreationDate"], &date)
 	if err != nil {
 		log.Fatalf("unmarshal failed, %v", err)
 	}
 
-	return bucket, region, filename
+	return UUID, date
 
 }
 
+// Could make another get method that uses Query instead of getItem, allowing us to have a range key and not need to
+// specify it
+
 // Put creates/update a new entry in the Dynamodb
-func Put(clientConfig *dynamodb.Client, tableName string, UUID string, bucket string, region string, filename string) {
+func Put(clientConfig *dynamodb.Client, tableName string, msName string, UUID string, date string) {
 
 	var itemInput = dynamodb.PutItemInput{
 		TableName: aws.String(tableName),
 
 		Item: map[string]types.AttributeValue{
-			"UUID":     &types.AttributeValueMemberS{Value: UUID},
-			"bucket":   &types.AttributeValueMemberS{Value: bucket},
-			"region":   &types.AttributeValueMemberS{Value: region},
-			"filename": &types.AttributeValueMemberS{Value: filename},
+			"MsName":       &types.AttributeValueMemberS{Value: msName},
+			"UUID":         &types.AttributeValueMemberS{Value: UUID},
+			"CreationDate": &types.AttributeValueMemberS{Value: date},
 		},
 	}
 
@@ -62,12 +66,12 @@ func Put(clientConfig *dynamodb.Client, tableName string, UUID string, bucket st
 }
 
 // Delete removes a item from the table given the key
-func Delete(clientConfig *dynamodb.Client, tableName string, UUID string) error {
+func Delete(clientConfig *dynamodb.Client, tableName string, msName string) error {
 
 	deleteInput := dynamodb.DeleteItemInput{
 		TableName: aws.String(tableName),
 		Key: map[string]types.AttributeValue{
-			"UUID": &types.AttributeValueMemberS{Value: UUID},
+			"MsName": &types.AttributeValueMemberS{Value: msName},
 		},
 	}
 
@@ -95,7 +99,7 @@ func DeleteAll(clientConfig *dynamodb.Client, tableName string) {
 			_, err = clientConfig.DeleteItem(context.TODO(), &dynamodb.DeleteItemInput{
 				TableName: aws.String(tableName),
 				Key: map[string]types.AttributeValue{
-					"UUID": item["UUID"],
+					"MsName": item["MsName"],
 				},
 			})
 			if err != nil {
@@ -105,4 +109,45 @@ func DeleteAll(clientConfig *dynamodb.Client, tableName string) {
 
 		}
 	}
+}
+
+// DeleteExpiredUUIDs Expired UUIDs have persisted for 30 days or longer
+func DeleteExpiredUUIDs(clientConfig *dynamodb.Client, tableName string) {
+
+	loc, _ := time.LoadLocation("UTC")
+
+	//earliestAcceptedDate := time.Now().In(loc)
+	latestAcceptedDate := time.Now().In(loc).Add(-720 * time.Hour) // 30 days from current time
+
+	out, err := clientConfig.Query(context.TODO(), &dynamodb.QueryInput{
+		TableName:              aws.String(common.TableName),
+		IndexName:              aws.String("CreationDateIndex"),
+		KeyConditionExpression: aws.String("CreationDate < :latestAcceptedDate"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":latestAcceptedDate": &types.AttributeValueMemberS{
+				Value: latestAcceptedDate.String(),
+			},
+		},
+
+		//KeyConditions: map[string]types.Condition{
+		//	"CreationDate": {
+		//		ComparisonOperator: "LT",
+		//		AttributeValueList: []types.AttributeValue{&types.AttributeValueMemberS{
+		//			Value: latestAcceptedDate.String()},
+		//		},
+		//	},
+		//},
+		//ExpressionAttributeValues: map[string]types.AttributeValue{
+		//	":date": &types.AttributeValueMemberS{Value: latestAcceptedDate.String()},
+		//},
+		//
+		//FilterExpression: aws.String("CreationDate < :date"),
+	})
+	if err != nil {
+		print("Error querying expired dates")
+		log.Fatal(err)
+	}
+
+	fmt.Println(out.Items)
+
 }
